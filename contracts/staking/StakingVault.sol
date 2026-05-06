@@ -45,7 +45,7 @@ import {
 uint256 constant LN_2 = 0.693147180559945309e18; // D18{1} ln(2e18)
 
 uint256 constant SCALAR = 1e18; // D18
-bytes32 constant OPTIMISTIC_DELEGATION_TYPEHASH =
+bytes32 constant OPTIMISTIC_DELEGATION_TYPEHASH =//abi.encode(TYPEHASH, delegatee, nonce, expiry) “Delegate optimistic votes to Bob, nonce = 1, expiry = tomorrow”
     keccak256("OptimisticDelegation(address delegatee,uint256 nonce,uint256 expiry)");
 
 /**
@@ -75,47 +75,49 @@ contract StakingVault is
 
     ReserveOptimisticGovernanceVersionRegistry public versionRegistry;
 
-    EnumerableSet.AddressSet private rewardTokens;
-    uint256 public rewardRatio; // D18{1}
+    EnumerableSet.AddressSet private rewardTokens;// List of all reward tokens  👉 Example: [USDC, DAI]
 
-    UnstakingManager public unstakingManager;
-    uint256 public unstakingDelay; // {s}
+    uint256 public rewardRatio; // D18{1}//Controls how fast rewards are released over time    👉 Example: Higher ratio → your 10 USDC reward comes faster
 
-    struct RewardInfo {
-        uint256 payoutLastPaid; // {s}
-        uint256 rewardIndex; // D18+decimals{reward/share}
-        //
-        uint256 balanceAccounted; // {reward}
-        uint256 balanceLastKnown; // {reward}
-        uint256 totalClaimed; // {reward}
+    UnstakingManager public unstakingManager;// Holds your tokens during withdrawal delay 👉 Example: You withdraw 100 → stored here for 7 days
+
+    uint256 public unstakingDelay; // {s} Time you must wait before getting tokens   👉 Example: 7 days lock before claim
+
+    struct RewardInfo { // RewardInfo (per reward token)
+        uint256 payoutLastPaid; // {s} Last time rewards were updated     Example: Last update happened 1 hour ago
+        uint256 rewardIndex; // D18+decimals{reward/share}   Global reward per share tracker    👉 Example: If it increases → your rewards increase
+        uint256 balanceAccounted; // {reward}//   Rewards already distributed to users  👉 Example: 60 out of 100 USDC already allocated
+    
+        uint256 balanceLastKnown; // {reward}  Last recorded reward balance in vault  👉 Example: Vault had 100 USDC
+        uint256 totalClaimed; // {reward}  Total rewards already claimed by users  👉 Example: 40 USDC already claimed
     }
 
-    struct UserRewardInfo {
-        uint256 lastRewardIndex; // D18+decimals{reward/share}
-        uint256 accruedRewards; // {reward}
+    struct UserRewardInfo {//👤 UserRewardInfo (per user)
+        uint256 lastRewardIndex; // D18+decimals{reward/share}  Your last checkpoint  //👉 Example: You joined when index = 5
+        uint256 accruedRewards; // {reward}  Rewards you earned but not claimed    👉 Example: You earned 10 USDC
     }
 
-    IRewardTokenRegistry public rewardTokenRegistry;
+    IRewardTokenRegistry public rewardTokenRegistry;// Checks if a token is allowed as reward  👉 Example: Only approved tokens like USDC can be added
 
-    mapping(address token => RewardInfo rewardInfo) public rewardTrackers;
-    mapping(address token => bool isDisallowed) public disallowedRewardTokens;
-    mapping(address token => mapping(address user => UserRewardInfo userReward)) public userRewardTrackers;
+    mapping(address token => RewardInfo rewardInfo) public rewardTrackers;//Stores global reward data for each token (like USDC reward distribution info).
+    mapping(address token => bool isDisallowed) public disallowedRewardTokens;//Marks tokens that are permanently banned from being used as rewards.
+    mapping(address token => mapping(address user => UserRewardInfo userReward)) public userRewardTrackers;//Stores each user’s earned rewards per token (like your pending USDC rewards).
 
-    mapping(address account => address delegatee) private optimisticDelegatees;
-    mapping(address delegatee => Checkpoints.Trace208) private optimisticDelegateCheckpoints;
+    mapping(address account => address delegatee) private optimisticDelegatees; //Stores who receives your optimistic (veto) voting powe
+    mapping(address delegatee => Checkpoints.Trace208) private optimisticDelegateCheckpoints;//Tracks historical optimistic voting power of each delegate for governance snapshots.
 
-    uint256 private totalDeposited; // {asset}
-    uint256 private nativeBalanceLastKnown; // {asset}
-    uint256 private nativeRewardsLastPaid; // {s}
+    uint256 private totalDeposited; // {asset}Total tokens deposited by all users in the vault.
+    uint256 private nativeBalanceLastKnown; // {asset} Last recorded balance of the main token in the vault.
+    uint256 private nativeRewardsLastPaid; // {s}  Last time native token rewards were calculated and updated.
 
-    error Vault__InvalidRewardToken(address rewardToken);
-    error Vault__DisallowedRewardToken(address rewardToken);
-    error Vault__RewardAlreadyRegistered();
-    error Vault__RewardNotRegistered();
-    error Vault__MaxRewardTokensReached();
-    error Vault__InvalidUnstakingDelay();
-    error Vault__InvalidRewardsHalfLife();
-    error Vault__InvalidAdmin(address admin);
+    error Vault__InvalidRewardToken(address rewardToken); //Reverts if an invalid token (like vault token itself) is used as reward.
+    error Vault__DisallowedRewardToken(address rewardToken);//Reverts if a banned reward token is used again.
+    error Vault__RewardAlreadyRegistered(); //Reverts if trying to add the same reward token twice.
+    error Vault__RewardNotRegistered();//Reverts if token is not approved in registry.
+    error Vault__MaxRewardTokensReached();//Reverts if reward token limit is exceeded.
+    error Vault__InvalidUnstakingDelay();//→ Reverts if unstaking delay is too high.
+    error Vault__InvalidRewardsHalfLife(); //Reverts if admin address is zero.
+    error Vault__InvalidAdmin(address admin);//Reverts if admin address is zero.
     error Vault__VersionDeprecated(bytes32 versionHash);
     error Vault__NotLatestStakingVault(address stakingVaultImpl);
 
@@ -181,11 +183,11 @@ contract StakingVault is
     /**
      * Deposit & Delegate
      */
-    function depositAndDelegate(uint256 assets) external returns (uint256 shares) {
-        shares = depositAndDelegate(assets, msg.sender, msg.sender);
-    }
+    function depositAndDelegate(uint256 assets) external returns (uint256 shares) { //Simple UX → auto delegate to yourself  ,,This function = “Stake + assign two controllers in one step”
+        shares = depositAndDelegate(assets, msg.sender, msg.sender);//depositAndDelegate(100, Bob, Charlie)   normal vote → Bob  optimistic vote → Charlie
+    }//Alice 100 token deposit করে → vault shares পায় 
 
-    function depositAndDelegate(uint256 assets, address delegatee, address optimisticDelegatee)
+    function depositAndDelegate(uint256 assets, address delegatee, address optimisticDelegatee)//Advanced UX → custom delegation
         public
         returns (uint256 shares)
     {
@@ -199,54 +201,54 @@ contract StakingVault is
         _delegateOptimistic(msg.sender, delegatee);
     }
 
-    function delegateOptimisticBySig(address delegatee, uint256 nonce, uint256 expiry, uint8 v, bytes32 r, bytes32 s)
+    function delegateOptimisticBySig(address delegatee, uint256 nonce, uint256 expiry, uint8 v, bytes32 r, bytes32 s)//👉 If time passed → ❌ reject
         external
     {
         if (block.timestamp > expiry) {
             revert IVotes.VotesExpiredSignature(expiry);
         }
 
-        address signer = ECDSA.recover(
+        address signer = ECDSA.recover(//ECDSA.recover(hash, v, r, s)
             _hashTypedDataV4(keccak256(abi.encode(OPTIMISTIC_DELEGATION_TYPEHASH, delegatee, nonce, expiry))), v, r, s
         );
-        _useCheckedNonce(signer, nonce);
-        _delegateOptimistic(signer, delegatee);
+        _useCheckedNonce(signer, nonce);//👉 Prevents replay (same signature reuse)
+        _delegateOptimistic(signer, delegatee);//👉 Bob gets Alice’s 100 optimistic votes
     }
 
-    function optimisticDelegates(address account) external view returns (address) {
+    function optimisticDelegates(address account) external view returns (address) {// optimisticDelegates(Alice)✔️ “Who is Alice’s optimistic delegate?”
         return optimisticDelegatees[account];
     }
 
-    function getOptimisticVotes(address account) external view returns (uint256) {
+    function getOptimisticVotes(address account) external view returns (uint256) {//getOptimisticVotes(Bob) Returns: 100✔️ “How many optimistic votes Bob currently has?”
         return optimisticDelegateCheckpoints[account].latest();
     }
 
-    function numOptimisticCheckpoints(address account) external view returns (uint32) {
+    function numOptimisticCheckpoints(address account) external view returns (uint32) {//numOptimisticCheckpoints(Bob) 👉 Returns: e.g. 3 ✔️ “How many times Bob’s vote balance changed in history?”
         return SafeCast.toUint32(optimisticDelegateCheckpoints[account].length());
     }
 
-    function optimisticCheckpoints(address account, uint32 pos)
-        external
+    function optimisticCheckpoints(address account, uint32 pos)//👉 Returns the vote snapshot (checkpoint) of a delegate at a specific position.Example: Bob has vote history → this gives Bob’s vote at index pos = 0 (first recorded vote).
+        external//Index (pos):   0     1     2,,Votes:       100 → 150 → 120
         view
-        returns (Checkpoints.Checkpoint208 memory)
+        returns (Checkpoints.Checkpoint208 memory)//Checkpoint208 = { time: 1000, votes: 150 }
     {
-        return optimisticDelegateCheckpoints[account].at(pos);
+        return optimisticDelegateCheckpoints[account].at(pos);//➡️ “Give me the checkpoint at index pos” ,,It comes from OpenZeppelin’s Checkpoints library.//{ time: T2, votes: 150 }
     }
 
-    function getPastOptimisticVotes(address account, uint256 timepoint) external view returns (uint256) {
-        return optimisticDelegateCheckpoints[account].upperLookupRecent(_validateTimepoint(timepoint));
+    function getPastOptimisticVotes(address account, uint256 timepoint) external view returns (uint256) {//👉 Returns how many votes a delegate had at a specific past time (using checkpoint history).
+        return optimisticDelegateCheckpoints[account].upperLookupRecent(_validateTimepoint(timepoint));//Time:   10      20      30 ,,Votes: 100 → 150 → 120  //  getPastOptimisticVotes(Bob, 25) ,,Look for last checkpoint ≤ 25,,That is time = 20 ,,Return 
     }
 
     function totalAssets() public view override returns (uint256) {
-        // {qAsset} = {qAsset} + {qAsset}
-        return totalDeposited + _currentAccountedNativeRewards();
+        // {qAsset} = {qAsset} + {qAsset}//👉 It means “quantity of asset” (just the amount of tokens).
+        return totalDeposited + _currentAccountedNativeRewards();//Users deposited = 100 tokens ,,Rewards accumulated = 10 tokens
     }
 
-    function _currentAccountedNativeRewards() internal view returns (uint256) {
-        uint256 elapsed = block.timestamp - nativeRewardsLastPaid;
-        uint256 rewardsBalance = nativeBalanceLastKnown - totalDeposited;
+    function _currentAccountedNativeRewards() internal view returns (uint256) {//👉 Calculates how many native reward tokens have been generated but not yet added to totalAssets.
+        uint256 elapsed = block.timestamp - nativeRewardsLastPaid;//Example: last update = 10 min ago → elapsed = 600s
+        uint256 rewardsBalance = nativeBalanceLastKnown - totalDeposited;//Example: contract has 110 tokens, deposits = 100 → rewardsBalance = 10
 
-        return _calculateHandout(rewardsBalance, elapsed);
+        return _calculateHandVout(rewardsBalance, elapsed);//👉 Calculates how much of that reward pool should be “released” based on time decay
     }
 
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares)
@@ -477,7 +479,7 @@ contract StakingVault is
     /**
      * @dev Uses global `rewardRatio`
      */
-    function _calculateHandout(uint256 balanceAvailable, uint256 elapsed)
+    function _calculateHandout(uint256 balanceAvailable, uint256 elapsed)//👉 Calculates how much reward should be released from the reward pool based on time decay (exponential curve).
         internal
         view
         returns (uint256 tokensToHandout)
@@ -486,11 +488,13 @@ contract StakingVault is
         if (balanceAvailable == 0 || elapsed == 0 || totalSupply() == 0) {
             return 0;
         }
-
-        uint256 handoutPercentage = 1e18 - UD60x18.wrap(1e18 - rewardRatio).powu(elapsed).unwrap() - 1; // rounds down
-
-        // {reward|asset} = {reward|asset} * D18{1} / D18
-        tokensToHandout = Math.mulDiv(balanceAvailable, handoutPercentage, 1e18);
+//rewardRatio 👉 base speed of reward release (per second decay rate)
+//.powu(elapsed) 👉 applies exponential decay: “apply this reduction repeatedly for each second”
+// (1e18 - rewardRatio).powu(elapsed) =(1 - rewardRatio) ^ elapsed
+        uint256 handoutPercentage = 1e18 - UD60x18.wrap(1e18 - rewardRatio).powu(elapsed).unwrap() - 1; // rounds down , “How much % of rewards should be released after elapsed time”
+    
+        // {reward|asset} = {reward|asset} * D18{1} / D18 
+        tokensToHandout = Math.mulDiv(balanceAvailable, handoutPercentage, 1e18);//
     }
 
     /**
