@@ -248,7 +248,7 @@ contract StakingVault is
         uint256 elapsed = block.timestamp - nativeRewardsLastPaid;//Example: last update = 10 min ago → elapsed = 600s
         uint256 rewardsBalance = nativeBalanceLastKnown - totalDeposited;//Example: contract has 110 tokens, deposits = 100 → rewardsBalance = 10
 
-        return _calculateHandVout(rewardsBalance, elapsed);//👉 Calculates how much of that reward pool should be “released” based on time decay
+        return _calculateHandVout(rewardsBalance, elapsed);//👉it calculates how much reward should be released after 2 seconds//rewardsBalance = 100 tokens elapsed = 2 seconds  = 19 tokens
     }
 
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares)
@@ -261,115 +261,208 @@ contract StakingVault is
 
         super._deposit(caller, receiver, assets, shares);
     }
-
     /**
      * Withdraw Logic
      */
-    function _withdraw(address _caller, address _receiver, address _owner, uint256 _assets, uint256 _shares)
+    function _withdraw( //👉 Handles user withdrawal flow (instant withdraw OR delayed unstaking lock)
+        address _caller, //👉 Person calling withdraw   Example: Bob calls withdraw for Alice
+        address _receiver, //👉 Final receiver of assets   Example: Alice receives unstaked tokens
+        address _owner, //👉 Owner of vault shares   Example: Alice owns 100 shares
+        uint256 _assets, //👉 Amount of underlying tokens to withdraw   Example: 100 USDC
+        uint256 _shares //👉 Amount of vault shares to burn   Example: burn 100 shares
+    )
         internal
         override
-        accrueRewards(_owner, _receiver)
+        accrueRewards(_owner, _receiver) //👉 First update pending rewards before balances change
     {
-        totalDeposited -= _assets;
-        nativeBalanceLastKnown -= _assets;
+        totalDeposited -= _assets; //👉 Reduce total vault deposited amount   Example: 1000 → 900
+        nativeBalanceLastKnown -= _assets; //👉 Reduce tracked vault balance   Example: vault balance 1000 → 900
+
         // nativeBalanceLastKnown update is redundant, final value set at bottom of function
 
-        if (unstakingDelay == 0) {
-            super._withdraw(_caller, _receiver, _owner, _assets, _shares);
-        } else {
+        if (unstakingDelay == 0) { //👉 If no delay → withdraw instantly
+            super._withdraw(_caller, _receiver, _owner, _assets, _shares); //👉 Sends tokens immediately to receiver
+        } else { //👉 Delayed unstaking mode enabled
             // Since we can't use the builtin `_withdraw`, we need to take care of the entire flow here.
-            if (_caller != _owner) {
-                _spendAllowance(_owner, _caller, _shares);
+
+            if (_caller != _owner) { //👉 If someone withdraws on behalf of owner
+                _spendAllowance(_owner, _caller, _shares); //👉 Consume allowance approval   Example: Bob uses Alice approval
             }
 
             // Burn the shares first.
-            _burn(_owner, _shares);
+            _burn(_owner, _shares); //👉 Destroy vault shares first   Example: Alice 100 shares → 0
 
             SafeERC20.forceApprove(IERC20(asset()), address(unstakingManager), _assets);
+            //👉 Allow unstakingManager to pull withdrawn assets
+
             unstakingManager.createLock(_receiver, _assets, block.timestamp + unstakingDelay);
+            //👉 Create withdrawal lock   Example: 100 USDC locked for 7 days before claim
 
             emit Withdraw(_caller, _receiver, _owner, _assets, _shares);
+            //👉 Emit withdraw event for tracking/history
         }
 
         nativeBalanceLastKnown = IERC20(asset()).balanceOf(address(this));
+        //👉 Sync final actual vault token balance from ERC20 contract
     }
 
     /// @param _delay {s} New unstaking delay
     function setUnstakingDelay(uint256 _delay) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        _setUnstakingDelay(_delay);
+        //👉 Admin function to update withdrawal waiting time
+
+        _setUnstakingDelay(_delay); //👉 Example: admin changes delay from 3 days → 7 days
     }
 
     /// @param _delay {s} New unstaking delay
     function _setUnstakingDelay(uint256 _delay) internal {
-        require(_delay <= MAX_UNSTAKING_DELAY, Vault__InvalidUnstakingDelay());
+        require(
+            _delay <= MAX_UNSTAKING_DELAY,
+            Vault__InvalidUnstakingDelay()
+        );
+        //👉 Prevents extremely large delay values
 
-        unstakingDelay = _delay;
-        emit UnstakingDelaySet(_delay);
+        unstakingDelay = _delay; //👉 Save new unstaking delay
+        emit UnstakingDelaySet(_delay); //👉 Emit configuration update event
     }
 
     /**
      * Reward Management Logic
      */
+
     /// @param _rewardToken Reward token to add
-    function addRewardToken(address _rewardToken) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(_rewardToken != address(this) && _rewardToken != asset(), Vault__InvalidRewardToken(_rewardToken));
-        require(!disallowedRewardTokens[_rewardToken], Vault__DisallowedRewardToken(_rewardToken));
-        require(rewardTokenRegistry.isRegistered(_rewardToken), Vault__RewardNotRegistered());
-        require(rewardTokens.length() < MAX_REWARD_TOKENS, Vault__MaxRewardTokensReached());
-        require(rewardTokens.add(_rewardToken), Vault__RewardAlreadyRegistered());
+    function addRewardToken(address _rewardToken)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(
+            _rewardToken != address(this) &&
+            _rewardToken != asset(),
+            Vault__InvalidRewardToken(_rewardToken)
+        );
+        //👉 Prevent vault token or staking asset itself as reward token
+
+        require(
+            !disallowedRewardTokens[_rewardToken],
+            Vault__DisallowedRewardToken(_rewardToken)
+        );
+        //👉 Prevent previously banned reward token reuse
+
+        require(
+            rewardTokenRegistry.isRegistered(_rewardToken),
+            Vault__RewardNotRegistered()
+        );
+        //👉 Reward token must exist in approved registry
+
+        require(
+            rewardTokens.length() < MAX_REWARD_TOKENS,
+            Vault__MaxRewardTokensReached()
+        );
+        //👉 Prevent too many reward tokens   Example: limit = 10
+
+        require(
+            rewardTokens.add(_rewardToken),
+            Vault__RewardAlreadyRegistered()
+        );
+        //👉 Prevent duplicate reward token addition
 
         RewardInfo storage rewardInfo = rewardTrackers[_rewardToken];
+        //👉 Load reward tracking storage for this token
 
         rewardInfo.payoutLastPaid = block.timestamp;
-        rewardInfo.balanceLastKnown = IERC20(_rewardToken).balanceOf(address(this));
+        //👉 Start reward accounting from current time
+
+        rewardInfo.balanceLastKnown =
+            IERC20(_rewardToken).balanceOf(address(this));
+        //👉 Save current vault reward token balance   Example: vault already has 500 DAI
 
         emit RewardTokenAdded(_rewardToken);
+        //👉 Emit reward token added event
     }
 
     /// @dev To be called in event of bad ERC20; all unaccrued rewards will be lost forever
     /// @param _rewardToken Reward token to remove
-    function removeRewardToken(address _rewardToken) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function removeRewardToken(address _rewardToken)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
         disallowedRewardTokens[_rewardToken] = true;
+        //👉 Permanently blacklist token from future usage
 
-        require(rewardTokens.remove(_rewardToken), Vault__RewardNotRegistered());
+        require(
+            rewardTokens.remove(_rewardToken),
+            Vault__RewardNotRegistered()
+        );
+        //👉 Remove token from active reward list
 
         emit RewardTokenRemoved(_rewardToken);
+        //👉 Emit reward token removal event
     }
 
     /// Allows to claim rewards
     /// Supports claiming accrued rewards for disallowed/removed/unregistered tokens
+
     /// @param _rewardTokens Array of reward tokens to claim
     /// @return claimableRewards Amount claimed for each rewardToken
     function claimRewards(address[] calldata _rewardTokens)
         external
-        accrueRewards(msg.sender, msg.sender)
+        accrueRewards(msg.sender, msg.sender) //👉 First update latest pending rewards
         returns (uint256[] memory claimableRewards)
     {
         claimableRewards = new uint256[](_rewardTokens.length);
+        //👉 Create output array for returned claimed amounts
 
         for (uint256 i; i < _rewardTokens.length; i++) {
+            //👉 Loop through each requested reward token
+
             address _rewardToken = _rewardTokens[i];
+            //👉 Current reward token   Example: DAI
 
-            RewardInfo storage rewardInfo = rewardTrackers[_rewardToken];
-            UserRewardInfo storage userRewardTracker = userRewardTrackers[_rewardToken][msg.sender];
+            RewardInfo storage rewardInfo =
+                rewardTrackers[_rewardToken];
+            //👉 Global reward tracking storage
 
-            claimableRewards[i] = userRewardTracker.accruedRewards;
+            UserRewardInfo storage userRewardTracker =
+                userRewardTrackers[_rewardToken][msg.sender];
+            //👉 User-specific pending rewards storage
+
+            claimableRewards[i] =
+                userRewardTracker.accruedRewards;
+            //👉 Load user pending rewards   Example: Alice earned 25 DAI
 
             if (claimableRewards[i] != 0) {
-                // {reward} += {reward}
+                //👉 Only transfer if rewards exist
+
                 rewardInfo.totalClaimed += claimableRewards[i];
+                //👉 Increase total claimed counter
+
                 userRewardTracker.accruedRewards = 0;
+                //👉 Reset user pending rewards after claim
 
-                SafeERC20.safeTransfer(IERC20(_rewardToken), msg.sender, claimableRewards[i]);
+                SafeERC20.safeTransfer(
+                    IERC20(_rewardToken),
+                    msg.sender,
+                    claimableRewards[i]
+                );
+                //👉 Send reward tokens to user
 
-                emit RewardsClaimed(msg.sender, _rewardToken, claimableRewards[i]);
+                emit RewardsClaimed(
+                    msg.sender,
+                    _rewardToken,
+                    claimableRewards[i]
+                );
+                //👉 Emit reward claim event
             }
         }
     }
 
     /// @return All reward tokens, including ones not registered with the registry anymore
-    function getAllRewardTokens() external view returns (address[] memory) {
+    function getAllRewardTokens()
+        external
+        view
+        returns (address[] memory)
+    {
         return rewardTokens.values();
+        //👉 Returns all reward token addresses   Example: [DAI, USDC, WETH]
     }
 
     /**
@@ -488,13 +581,12 @@ contract StakingVault is
         if (balanceAvailable == 0 || elapsed == 0 || totalSupply() == 0) {
             return 0;
         }
-//rewardRatio 👉 base speed of reward release (per second decay rate)
-//.powu(elapsed) 👉 applies exponential decay: “apply this reduction repeatedly for each second”
-// (1e18 - rewardRatio).powu(elapsed) =(1 - rewardRatio) ^ elapsed
-        uint256 handoutPercentage = 1e18 - UD60x18.wrap(1e18 - rewardRatio).powu(elapsed).unwrap() - 1; // rounds down , “How much % of rewards should be released after elapsed time”
+//handoutPercentage = 1e18 - (1e18 - rewardRatio)^elapsed
+
+        uint256 handoutPercentage = 1e18 - UD60x18.wrap(1e18 - rewardRatio).powu(elapsed).unwrap() - 1; // 100 tokens locked  ,,Step 1 :10% released:10 released 90 locked
     
         // {reward|asset} = {reward|asset} * D18{1} / D18 
-        tokensToHandout = Math.mulDiv(balanceAvailable, handoutPercentage, 1e18);//
+        tokensToHandout = Math.mulDiv(balanceAvailable, handoutPercentage, 1e18);//tokensToHandout = 100 × 19%   = 19 tokens
     }
 
     /**
