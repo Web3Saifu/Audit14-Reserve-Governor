@@ -250,16 +250,28 @@ contract StakingVault is
 
         return _calculateHandVout(rewardsBalance, elapsed);//👉it calculates how much reward should be released after 2 seconds//rewardsBalance = 100 tokens elapsed = 2 seconds  = 19 tokens
     }
-
-    function _deposit(address caller, address receiver, uint256 assets, uint256 shares)
+    function _deposit( //👉 Internal deposit function used during staking
+        address caller, //👉 Who sends the tokens    Example: Alice
+        address receiver, //👉 Who receives vault shares    Example: Alice
+        uint256 assets, //👉 Amount deposited    Example: 100 USDC
+        uint256 shares //👉 Shares minted    Example: 100 vault shares
+    )
         internal
         override
-        accrueRewards(caller, receiver)
+        accrueRewards(caller, receiver) //👉 Update rewards before balances change
     {
-        totalDeposited += assets;
-        nativeBalanceLastKnown += assets;
+        totalDeposited += assets; //👉 Tracks only user deposited principal    Example: 900 → 1000
+
+        nativeBalanceLastKnown += assets; //👉 Tracks total vault balance snapshot    Example: vault balance 900 → 1000
+
+        //👉 Difference:
+        //   totalDeposited = only user deposits
+        //   nativeBalanceLastKnown = all tokens inside vault
 
         super._deposit(caller, receiver, assets, shares);
+        //👉 ERC4626 deposit flow
+        //👉 Transfers tokens into vault and mints shares
+        //👉 Example: Alice deposits 100 USDC → receives 100 vault shares
     }
     /**
      * Withdraw Logic
