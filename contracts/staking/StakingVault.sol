@@ -258,7 +258,7 @@ contract StakingVault is
     )
         internal
         override
-        accrueRewards(caller, receiver) //👉 Update rewards before balances change
+        accrueRewards(caller, receiver) //?👉 Update rewards before balances change
     {
         totalDeposited += assets; //👉 Tracks only user deposited principal    Example: 900 → 1000
 
@@ -272,7 +272,7 @@ contract StakingVault is
         //👉 ERC4626 deposit flow
         //👉 Transfers tokens into vault and mints shares
         //👉 Example: Alice deposits 100 USDC → receives 100 vault shares
-    }
+    }//*Done
     /**
      * Withdraw Logic
      */
@@ -648,33 +648,100 @@ contract StakingVault is
         require(latestStakingVaultImpl == stakingVaultImpl, Vault__NotLatestStakingVault(stakingVaultImpl));
     }
 
-    function _delegateOptimistic(address account, address delegatee) internal {
+    function _delegateOptimistic( //👉 Changes optimistic voting delegation
+        address account, //👉 User whose votes are being delegated    Example: Alice
+        address delegatee //👉 New optimistic delegate    Example: Bob
+    )
+        internal
+    {
         address oldDelegate = optimisticDelegatees[account];
+        //👉 Load previous delegate    Example: Charlie was old delegate
+
         optimisticDelegatees[account] = delegatee;
+        //👉 Save new delegate    Example: Alice now delegates optimistic votes to Bob
 
-        emit OptimisticDelegateChanged(account, oldDelegate, delegatee);
-        _moveOptimisticDelegateVotes(oldDelegate, delegatee, balanceOf(account));
+        emit OptimisticDelegateChanged(account, oldDelegate, delegatee); // @audit  What if Old delegates not exist ?
+        //👉 Emit delegation change event
+        //👉 Example: Alice changed delegate from Charlie → Bob
+
+        _moveOptimisticDelegateVotes(
+            oldDelegate,
+            delegatee,
+            balanceOf(account)
+        );
+        //👉 Move voting power from old delegate → new delegate
+        //👉 Example:
+        //   Alice owns 100 vault shares
+        //   Charlie loses 100 optimistic votes
+        //   Bob receives 100 optimistic votes
     }
 
-    function _moveOptimisticDelegateVotes(address from, address to, uint256 amount) internal {
-        if (from == to || amount == 0) {
-            return;
-        }
-
-        if (from != address(0)) {
-            Checkpoints.Trace208 storage fromCheckpoints = optimisticDelegateCheckpoints[from];
-            uint256 oldValue = fromCheckpoints.latest();
-            uint256 newValue = oldValue - amount;
-            fromCheckpoints.push(clock(), SafeCast.toUint208(newValue));
-            emit OptimisticDelegateVotesChanged(from, oldValue, newValue);
-        }
-
-        if (to != address(0)) {
-            Checkpoints.Trace208 storage toCheckpoints = optimisticDelegateCheckpoints[to];
-            uint256 oldValue = toCheckpoints.latest();
-            uint256 newValue = oldValue + amount;
-            toCheckpoints.push(clock(), SafeCast.toUint208(newValue));
-            emit OptimisticDelegateVotesChanged(to, oldValue, newValue);
-        }
+function _moveOptimisticDelegateVotes( //👉 Moves optimistic voting power from one delegate → another delegate
+    address from, //👉 Old delegate losing votes   Example: Charlie
+    address to, //👉 New delegate receiving votes   Example: Bob
+    uint256 amount //👉 Amount of votes being moved   Example: 100 votes
+)
+    internal
+{
+    if (from == to || amount == 0) { //👉 Skip if delegate unchanged OR no votes to move   Example: Bob → Bob
+        return;
     }
+
+    if (from != address(0)) { //👉 Remove votes from old delegate   address(0) means “no delegate”
+
+        Checkpoints.Trace208 storage fromCheckpoints =
+            optimisticDelegateCheckpoints[from];
+        //👉 Load Charlie vote-history storage from mapping
+        //👉 Trace208 stores historical snapshots like:
+        //👉 time 100 => 50 votes
+        //👉 time 200 => 300 votes
+
+        uint256 oldValue = fromCheckpoints.latest(); //👉 .latest() comes from OpenZeppelin Checkpoints library   Gets newest stored vote amount   Example: 300
+
+        uint256 newValue = oldValue - amount; //👉 Remove moved votes   Example: 300 - 100 = 200
+
+        fromCheckpoints.push(
+            clock(),
+            SafeCast.toUint208(newValue)
+        );
+        //👉 Save new historical checkpoint into Charlie history
+        //👉 Example: current time 300 => 200 votes
+        //👉 push(time, votes) adds a new snapshot record
+
+        emit OptimisticDelegateVotesChanged(
+            from,
+            oldValue,
+            newValue
+        );
+        //👉 Emit event showing Charlie votes changed from 300 → 200
+    }
+
+    if (to != address(0)) { //👉 Add votes to new delegate
+
+        Checkpoints.Trace208 storage toCheckpoints =
+            optimisticDelegateCheckpoints[to];
+        //👉 Load Bob vote-history storage from mapping
+        //👉 Example history:
+        //👉 time 100 => 20 votes
+        //👉 time 200 => 50 votes
+
+        uint256 oldValue = toCheckpoints.latest(); //👉 Get Bob latest stored votes   Example: 50
+
+        uint256 newValue = oldValue + amount; //👉 Add moved votes   Example: 50 + 100 = 150
+
+        toCheckpoints.push(
+            clock(),
+            SafeCast.toUint208(newValue)
+        );
+        //👉 Save new checkpoint into Bob history
+        //👉 Example: current time 300 => 150 votes
+
+        emit OptimisticDelegateVotesChanged(
+            to,
+            oldValue,
+            newValue
+        );
+        //👉 Emit event showing Bob votes changed from 50 → 150
+    }
+}
 }
