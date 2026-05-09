@@ -1,39 +1,100 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity ^0.8.28; 
 
 import { IVotes } from "@openzeppelin/contracts/governance/utils/IVotes.sol";
+//👉 Governance voting interface from OpenZeppelin
+//👉 Used for vote delegation and vote snapshots
+
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+//👉 Standard ERC20 token interface
+//👉 Used to interact with tokens like USDC, DAI
+
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+//👉 Safe wrapper around ERC20 operations
+//👉 Handles broken ERC20 tokens safely
+
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+//👉 Used for signature verification/recovery
+//👉 Example: Recover signer from signed message
+
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
+//👉 Extra math utilities
+//👉 Example: mulDiv() for precision multiplication/division
+
 import { SafeCast } from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+//👉 Safely converts between integer sizes
+//👉 Example: uint256 → uint208 without overflow
+
 import { Checkpoints } from "@openzeppelin/contracts/utils/structs/Checkpoints.sol";
+//👉 Stores historical snapshots over time
+//👉 Example:
+//👉 Time 100 → 50 votes
+//👉 Time 200 → 120 votes
+
 import { EnumerableSet } from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
+//👉 Set structure with unique values
+//👉 Example: Prevent duplicate reward tokens
+
 import { Time } from "@openzeppelin/contracts/utils/types/Time.sol";
+//👉 OpenZeppelin time helper library
+//👉 Used for governance timestamp checkpoints
 
 import {
     AccessControlEnumerableUpgradeable
 } from "@openzeppelin/contracts-upgradeable/access/extensions/AccessControlEnumerableUpgradeable.sol";
+//👉 Upgradeable role-based access control
+//👉 Example: Admin role management
+
 import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+//👉 UUPS proxy upgrade system
+//👉 Allows implementation upgrades
+
 import { ERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+//👉 Upgradeable ERC20 implementation
+
 import {
     ERC20PermitUpgradeable
 } from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUpgradeable.sol";
+//👉 ERC20 permit support
+//👉 Allows approvals using signatures instead of transactions
+
 import {
     ERC20VotesUpgradeable
 } from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20VotesUpgradeable.sol";
+//👉 Governance voting extension for ERC20
+//👉 Adds delegation + vote checkpoints
+
 import { ERC4626Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC4626Upgradeable.sol";
+//👉 Upgradeable tokenized vault standard
+//👉 Users deposit assets and receive vault shares
+
 import { NoncesUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/NoncesUpgradeable.sol";
+//👉 Tracks signature nonces
+//👉 Prevents replay attacks
 
 import { UD60x18 } from "@prb/math/src/UD60x18.sol";
+//👉 PRBMath fixed-point decimal math library
+//👉 Used for exponential reward calculations
 
 import { IReserveOptimisticGovernorDeployer } from "@interfaces/IDeployer.sol";
+//👉 Interface for deployer contract
+//👉 Used during initialization setup
+
 import { IOptimisticVotes } from "@interfaces/IOptimisticVotes.sol";
+//👉 Custom optimistic voting interface
+
 import { IRewardTokenRegistry } from "@interfaces/IRewardTokenRegistry.sol";
+//👉 Registry interface for approved reward tokens
 
 import { ReserveOptimisticGovernanceVersionRegistry } from "@src/VersionRegistry.sol";
+//👉 Stores approved implementation versions for upgrades
+
 import { UnstakingManager } from "@staking/UnstakingManager.sol";
+//👉 Handles delayed unstaking locks
+//👉 Example: Wait 7 days before withdrawal claim
+
 import { Versioned } from "@utils/Versioned.sol";
+//👉 Provides contract version string utilities
 
 import {
     MAX_REWARD_HALF_LIFE,
@@ -41,39 +102,77 @@ import {
     MAX_UNSTAKING_DELAY,
     MIN_REWARD_HALF_LIFE
 } from "../utils/Constants.sol";
+//👉 Global system constants
+//👉 Example:
+//👉 Max reward tokens limit
+//👉 Max unstaking delay
+//👉 Reward half-life boundaries
 
-uint256 constant LN_2 = 0.693147180559945309e18; // D18{1} ln(2e18)
+uint256 constant LN_2 = 0.693147180559945309e18;
+//👉 Natural log of 2 in 18 decimal precision
+//👉 Used for exponential reward decay math
 
-uint256 constant SCALAR = 1e18; // D18
-bytes32 constant OPTIMISTIC_DELEGATION_TYPEHASH =//abi.encode(TYPEHASH, delegatee, nonce, expiry) “Delegate optimistic votes to Bob, nonce = 1, expiry = tomorrow”
-    keccak256("OptimisticDelegation(address delegatee,uint256 nonce,uint256 expiry)");
+uint256 constant SCALAR = 1e18;
+//👉 Fixed-point precision scaler
+//👉 1e18 = 100%
+
+bytes32 constant OPTIMISTIC_DELEGATION_TYPEHASH =
+    keccak256(
+        "OptimisticDelegation(address delegatee,uint256 nonce,uint256 expiry)"
+    );
+//👉 Unique EIP712 type hash for optimistic delegation signatures
+//👉 Prevents signature format mismatch attacks
+//👉 Example signed message:
+//👉 "Delegate optimistic votes to Bob until tomorrow"
 
 /**
  * @title StakingVault
  * @author akshatmittal, julianmrodri, pmckelvy1, tbrent
- * @notice StakingVault is a transferrable vault of an underlying token that uses the ERC4626 interface.
- *         It earns the holder a claimable stream of multi rewards and enables them to vote in (external) governance.
- *         Unstaking is gated by a delay, implemented by an UnstakingManager.
  *
- * @dev StakingVault also supports native asset() rewards alongside other reward tokens, but are handled independently.
- *      All reward tokens must be registered in the RewardTokenRegistry. Reward tokens must remain registered in the
- *      RewardTokenRegistry in order to continue accruing rewards. Users can claim any ERC20 where rewards have accrued.
+ * @notice
+ * 👉 ERC4626 staking vault with:
+ * 👉 deposits,
+ * 👉 rewards,
+ * 👉 governance voting,
+ * 👉 delayed unstaking,
+ * 👉 upgradeability
  *
- * @dev New versions MUST always be backwards-compatible for the sake of all ReserveOptimisticGovernors using it.
+ * @dev
+ * 👉 Users deposit underlying token and receive vault shares
+ * 👉 Vault distributes reward tokens over time
+ * 👉 Users can delegate governance voting power
+ * 👉 Withdrawals may be delayed using UnstakingManager
+ *
+ * 👉 Supports:
+ * 👉 native rewards (same asset token)
+ * 👉 external ERC20 reward tokens
+ *
+ * 👉 Upgrade system requires approved versions from registry
  */
+
 contract StakingVault is
-    ERC4626Upgradeable,
-    ERC20PermitUpgradeable,
-    ERC20VotesUpgradeable,
-    AccessControlEnumerableUpgradeable,
-    Versioned,
-    UUPSUpgradeable,
-    IOptimisticVotes
+    ERC4626Upgradeable, //👉 ERC4626 vault logic
+    ERC20PermitUpgradeable, //👉 Permit signature approvals
+    ERC20VotesUpgradeable, //👉 Governance vote tracking
+    AccessControlEnumerableUpgradeable, //👉 Admin role system
+    Versioned, //👉 Version utilities
+    UUPSUpgradeable, //👉 Upgradeability logic
+    IOptimisticVotes //👉 Custom optimistic voting interface
 {
     using EnumerableSet for EnumerableSet.AddressSet;
-    using Checkpoints for Checkpoints.Trace208;
+    //👉 Adds helper functions to AddressSet
+    //👉 Example: add(), remove(), values()
 
-    ReserveOptimisticGovernanceVersionRegistry public versionRegistry;
+    using Checkpoints for Checkpoints.Trace208;
+    //👉 Adds checkpoint helper functions
+    //👉 Example: push(), latest(), at()
+
+    ReserveOptimisticGovernanceVersionRegistry
+        public
+        versionRegistry;
+    //👉 Registry storing approved upgrade versions
+    //👉 Used to validate safe implementation upgrades
+}
 
     EnumerableSet.AddressSet private rewardTokens;// List of all reward tokens  👉 Example: [USDC, DAI]
 
@@ -248,7 +347,7 @@ contract StakingVault is
         uint256 elapsed = block.timestamp - nativeRewardsLastPaid;//Example: last update = 10 min ago → elapsed = 600s
         uint256 rewardsBalance = nativeBalanceLastKnown - totalDeposited;//Example: contract has 110 tokens, deposits = 100 → rewardsBalance = 10
 
-        return _calculateHandVout(rewardsBalance, elapsed);//👉it calculates how much reward should be released after 2 seconds//rewardsBalance = 100 tokens elapsed = 2 seconds  = 19 tokens
+        return _calculateHandout(rewardsBalance, elapsed);//👉it calculates how much reward should be released after 2 seconds//rewardsBalance = 100 tokens elapsed = 2 seconds  = 19 tokens
     }
     function _deposit( //👉 Internal deposit function used during staking
         address caller, //👉 Who sends the tokens    Example: Alice
@@ -467,186 +566,540 @@ contract StakingVault is
         }
     }
 
-    /// @return All reward tokens, including ones not registered with the registry anymore
-    function getAllRewardTokens()
-        external
-        view
-        returns (address[] memory)
-    {
-        return rewardTokens.values();
-        //👉 Returns all reward token addresses   Example: [DAI, USDC, WETH]
+/// @return All reward tokens, including ones not registered with the registry anymore
+function getAllRewardTokens()
+    external
+    view
+    returns (address[] memory) //👉 Returns dynamic array in memory   Example: [DAI, USDC, WETH]
+{
+    return rewardTokens.values(); //👉 .values() comes from EnumerableSet library   Converts internal set → normal array
+}
+
+/**
+ * Reward Accrual Logic
+ */
+
+/// @param rewardHalfLife {s}   Example: 7 days
+function setRewardRatio(
+    uint256 rewardHalfLife //👉 Admin chooses reward release speed   Bigger half-life = slower reward release
+)
+    external
+    onlyRole(DEFAULT_ADMIN_ROLE) //👉 Only admin can change reward release configuration
+{
+    _setRewardRatio(rewardHalfLife); //👉 Calls internal configuration logic
+}
+
+/// @param _rewardHalfLife {s}
+function _setRewardRatio(
+    uint256 _rewardHalfLife //👉 Time needed for ~50% remaining rewards to unlock   Example: 7 days
+)
+    internal
+    accrueRewards(msg.sender, msg.sender) //👉 First updates pending rewards before changing release speed
+{
+    require(
+        _rewardHalfLife <= MAX_REWARD_HALF_LIFE &&
+        _rewardHalfLife >= MIN_REWARD_HALF_LIFE,
+        Vault__InvalidRewardsHalfLife()
+    );
+    //👉 Prevents extremely fast or extremely slow reward release settings
+
+    // D18{1/s} = D18{1} / {s}
+
+    rewardRatio = LN_2 / _rewardHalfLife;
+    //👉 Converts half-life → exponential decay speed
+    //👉 LN_2 = natural log of 2 used in exponential reward math
+    //👉 Smaller half-life = larger ratio = rewards release faster
+    //👉 Example:
+    //👉 1 day half-life → fast release
+    //👉 30 day half-life → slow release
+
+    emit RewardRatioSet(rewardRatio, _rewardHalfLife);
+    //👉 Emit event showing new reward release configuration
+}
+function poke()
+    external
+    accrueRewards(msg.sender, msg.sender) //👉 Just triggers reward update logic without deposit/withdraw   Example: Bob manually updates rewards
+{ }
+
+modifier accrueRewards(//“Already earned but not yet claimed rewards”
+    address _caller, //👉 Main user involved in action   Example: Bob
+    address _receiver //👉 Receiver affected by action   Example: Alice receives shares
+) {
+    _accrueRewards(_caller, _receiver);
+    //👉 First update all pending rewards before state changes happen
+    //👉 Prevents unfair reward accounting after balances change
+
+    _;
+    //👉 Continue executing original function logic
+}
+
+function _accrueRewards(
+    address _caller, //👉 User initiating action   Example: Bob
+    address _receiver //👉 User receiving balance update   Example: Alice
+)
+    internal
+{
+    address[] memory _rewardTokens = rewardTokens.values();//?
+    //👉 Load all reward token addresses into memory   Example: [USDC, DAI]
+
+    uint256 _rewardTokensLength = _rewardTokens.length;
+    //👉 Cache array length to save gas during loop
+
+    for (uint256 i; i < _rewardTokensLength; i++) {
+        //👉 Loop through every reward token one by one
+
+        address rewardToken = _rewardTokens[i];
+        //👉 Current reward token in loop   Example: USDC
+
+        if (!rewardTokenRegistry.isRegistered(rewardToken)) {
+            //👉 Skip token if registry no longer approves it
+
+            rewardTrackers[rewardToken].payoutLastPaid = block.timestamp;
+            //👉 Update timestamp so old elapsed time does not keep growing forever
+
+            continue;
+            //👉 Skip remaining logic for this token
+        }
+
+        _accrueRewards(rewardToken);
+        //👉 Update global reward accounting for this token
+        //👉 Example:
+        //👉 Vault had 100 unaccounted USDC rewards
+        //👉 Some portion becomes distributable now
+
+        _accrueUser(_receiver, rewardToken);
+        //👉 Update receiver’s personal pending rewards before balances change
+        //👉 Example:
+        //👉 Alice had earned 10 USDC so far
+        //👉 Save it before her share balance changes
+
+        // If a deposit/withdraw operation gets called for another user we should
+        // accrue for both of them to avoid potential issues
+        // This is important for accruing for "from" and "to" in a transfer.
+
+        if (_receiver != _caller) {
+            //👉 If two different users are involved, update both users
+            //👉 Example:
+            //👉 Bob transfers shares to Alice
+            //👉 Both balances will change
+
+            _accrueUser(_caller, rewardToken);
+            //👉 Update caller’s pending rewards before balance changes
+        }
     }
 
     /**
-     * Reward Accrual Logic
+     * Native asset() rewards are special cased
      */
-    /// @param rewardHalfLife {s}
-    function setRewardRatio(uint256 rewardHalfLife) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        _setRewardRatio(rewardHalfLife);
-    }
 
-    /// @param _rewardHalfLife {s}
-    function _setRewardRatio(uint256 _rewardHalfLife) internal accrueRewards(msg.sender, msg.sender) {
-        require(
-            _rewardHalfLife <= MAX_REWARD_HALF_LIFE && _rewardHalfLife >= MIN_REWARD_HALF_LIFE,
-            Vault__InvalidRewardsHalfLife()
+    totalDeposited += _currentAccountedNativeRewards();
+    //👉 Adds newly unlocked native rewards into vault accounting
+    //👉 Example:
+    //👉 Vault deposited assets = 1000
+    //👉 Newly unlocked rewards = 20
+    //👉 totalDeposited becomes 1020
+
+    nativeBalanceLastKnown = IERC20(asset()).balanceOf(address(this));
+    //👉 Save latest actual vault token balance
+    //👉 Example:
+    //👉 Contract currently holds 1020 tokens
+
+    nativeRewardsLastPaid = block.timestamp;
+    //👉 Save current timestamp as latest reward update time
+}
+
+function _accrueRewards(
+    address _rewardToken //👉 Reward token being updated   Example: USDC
+)
+    internal
+{
+    RewardInfo storage rewardInfo = rewardTrackers[_rewardToken];
+    //👉 Load global reward data for this token from storage
+    //👉 Example:
+    //👉 rewardInfo stores rewardIndex, balanceAccounted, payoutLastPaid etc.
+
+    uint256 balanceLastKnown = rewardInfo.balanceLastKnown;
+    //👉 Cache previous known reward balance
+    //👉 Example: Previously vault knew about 100 USDC rewards
+
+    rewardInfo.balanceLastKnown =
+        IERC20(_rewardToken).balanceOf(address(this)) +
+        rewardInfo.totalClaimed;
+    //👉 Update latest known total reward balance
+    //👉 Adds totalClaimed because claimed rewards already left vault physically
+    //👉 but still belong in accounting history
+    //👉 Example:
+    //👉 Current vault USDC = 70
+    //👉 Already claimed = 30
+    //👉 Total historical rewards = 100
+
+    uint256 elapsed =
+        block.timestamp - rewardInfo.payoutLastPaid;
+    //👉 Time passed since last reward update
+    //👉 Example:
+    //👉 Last update = 1000
+    //👉 Current time = 1060
+    //👉 elapsed = 60 seconds
+
+    uint256 unaccountedBalance =
+        balanceLastKnown - rewardInfo.balanceAccounted;
+    //👉 Rewards existing in vault but not yet distributed into rewardIndex
+    //👉 Example:
+    //👉 Total rewards known = 100
+    //👉 Already accounted = 40
+    //👉 unaccountedBalance = 60
+
+    uint256 tokensToHandout =
+        _calculateHandout(unaccountedBalance, elapsed);
+    //👉 Calculates how many rewards unlock during elapsed time
+    //👉 Example:
+    //👉 60 rewards pending
+    //👉 10 rewards unlock after 60 seconds
+
+    if (tokensToHandout != 0) {
+        //👉 Only update indexes if some rewards unlocked
+
+        // D18+decimals{reward/share} = D18 * {reward} * decimals / {share}
+
+        uint256 deltaIndex = Math.mulDiv(
+            tokensToHandout,
+            SCALAR * uint256(10 ** decimals()),
+            totalSupply()
         );
+        //👉 Calculates extra reward per share
+        //👉 Example:
+        //👉 10 USDC unlocked
+        //👉 Total shares = 100
+        //👉 Each share earns 0.1 USDC more
 
-        // D18{1/s} = D18{1} / {s}
-        rewardRatio = LN_2 / _rewardHalfLife;
+        // D18+decimals{reward/share} += D18+decimals{reward/share}
 
-        emit RewardRatioSet(rewardRatio, _rewardHalfLife);
+        rewardInfo.rewardIndex += deltaIndex;
+        //👉 Increase global reward-per-share index
+        //👉 Future users use this index to calculate earned rewards
+
+        rewardInfo.balanceAccounted += tokensToHandout;
+        //👉 Mark unlocked rewards as officially distributed/accounted
+        //👉 Example:
+        //👉 Previously accounted = 40
+        //👉 Newly unlocked = 10
+        //👉 New accounted = 50
     }
 
-    function poke() external accrueRewards(msg.sender, msg.sender) { }
+    rewardInfo.payoutLastPaid = block.timestamp;
+    //👉 Save latest reward update timestamp
+}
 
-    modifier accrueRewards(address _caller, address _receiver) {
-        _accrueRewards(_caller, _receiver);
-        _;
+function _accrueUser(
+    address _user, //👉 User whose rewards are being updated   Example: Alice
+    address _rewardToken //👉 Reward token being calculated   Example: USDC
+)
+    internal
+{
+    if (_user == address(0)) {
+        return;
+        //👉 Skip zero address because it is not a real user
     }
 
-    function _accrueRewards(address _caller, address _receiver) internal {
-        address[] memory _rewardTokens = rewardTokens.values();
-        uint256 _rewardTokensLength = _rewardTokens.length;
+    RewardInfo memory rewardInfo =
+        rewardTrackers[_rewardToken];
+    //👉 Load global reward data for this token into memory
+    //👉 Example:
+    //👉 Contains current rewardIndex for USDC rewards
 
-        for (uint256 i; i < _rewardTokensLength; i++) {
-            address rewardToken = _rewardTokens[i];
+    UserRewardInfo storage userRewardTracker =
+        userRewardTrackers[_rewardToken][_user];
+    //👉 Load user’s personal reward tracking storage
+    //👉 Example:
+    //👉 Alice’s lastRewardIndex and accruedRewards
 
-            if (!rewardTokenRegistry.isRegistered(rewardToken)) {
-                rewardTrackers[rewardToken].payoutLastPaid = block.timestamp;
-                continue;
-            }
+    // D18+decimals{reward/share}
 
-            _accrueRewards(rewardToken);
-            _accrueUser(_receiver, rewardToken);
+    uint256 deltaIndex =
+        rewardInfo.rewardIndex -
+        userRewardTracker.lastRewardIndex;
+    //👉 Calculates newly added reward-per-share since user’s last update
+    //👉 Example:
+    //👉 Current rewardIndex = 8
+    //👉 Alice lastRewardIndex = 5
+    //👉 deltaIndex = 3
 
-            // If a deposit/withdraw operation gets called for another user we should
-            // accrue for both of them to avoid potential issues
-            // This is important for accruing for "from" and "to" in a transfer.
-            if (_receiver != _caller) {
-                _accrueUser(_caller, rewardToken);
-            }
-        }
+    if (deltaIndex != 0) {
+        //👉 Continue only if new rewards were added globally
 
-        /**
-         * Native asset() rewards are special cased
-         */
+        // Accumulate rewards by multiplying user tokens by index and adding on unclaimed
+        // {reward} = {share} * D18+decimals{reward/share} / decimals / D18
 
-        totalDeposited += _currentAccountedNativeRewards();
-        nativeBalanceLastKnown = IERC20(asset()).balanceOf(address(this));
-        nativeRewardsLastPaid = block.timestamp;
+        uint256 supplierDelta = Math.mulDiv(
+            balanceOf(_user),
+            deltaIndex,
+            uint256(10 ** decimals()) * SCALAR
+        );
+        //👉 Calculates newly earned rewards for user
+        //👉 Example:
+        //👉 Alice has 100 shares
+        //👉 Each share earned 0.1 USDC more
+        //👉 Alice earns 10 new USDC rewards
+
+        // {reward} += {reward}
+
+        userRewardTracker.accruedRewards += supplierDelta;
+        //👉 Add newly earned rewards into pending claimable rewards
+        //👉 Example:
+        //👉 Previous pending rewards = 5 USDC
+        //👉 New rewards = 10 USDC
+        //👉 Total pending = 15 USDC
+
+        userRewardTracker.lastRewardIndex =
+            rewardInfo.rewardIndex;
+        //👉 Save latest global rewardIndex as user checkpoint
+        //👉 Prevents counting same rewards again next time
+    }
+}
+
+/**
+ * @dev Uses global `rewardRatio`
+ */
+
+function _calculateHandout(
+    uint256 balanceAvailable, //👉 Rewards still locked and available for future release   Example: 100 USDC
+    uint256 elapsed //👉 Time passed since last reward update in seconds   Example: 2 seconds
+)
+    internal
+    view
+    returns (uint256 tokensToHandout) //👉 Amount of rewards unlocked now
+{
+    // The checks are in order of likelihood to save gas
+
+    if (
+        balanceAvailable == 0 ||
+        elapsed == 0 ||
+        totalSupply() == 0
+    ) {
+        return 0;
+        //👉 No rewards released if:
+        //👉 no rewards exist,
+        //👉 no time passed,
+        //👉 or nobody owns shares
     }
 
-    function _accrueRewards(address _rewardToken) internal {
-        RewardInfo storage rewardInfo = rewardTrackers[_rewardToken];
+    // handoutPercentage = 1e18 - (1e18 - rewardRatio)^elapsed
 
-        uint256 balanceLastKnown = rewardInfo.balanceLastKnown;
-        rewardInfo.balanceLastKnown = IERC20(_rewardToken).balanceOf(address(this)) + rewardInfo.totalClaimed;
+    uint256 handoutPercentage =
+        1e18 -
+        UD60x18
+            .wrap(1e18 - rewardRatio)
+            .powu(elapsed)
+            .unwrap() -
+        1;
+    //👉 Calculates how much percentage of locked rewards should unlock
+    //👉 Uses exponential decay release model
+    //👉 Rewards release fast at start, then slower later
 
-        uint256 elapsed = block.timestamp - rewardInfo.payoutLastPaid;
-        uint256 unaccountedBalance = balanceLastKnown - rewardInfo.balanceAccounted;
-        uint256 tokensToHandout = _calculateHandout(unaccountedBalance, elapsed);
+    //👉 Example:
+    //👉 rewardRatio = 10%
+    //👉 Locked rewards = 100 tokens
 
-        if (tokensToHandout != 0) {
-            // D18+decimals{reward/share} = D18 * {reward} * decimals / {share}
-            uint256 deltaIndex = Math.mulDiv(tokensToHandout, SCALAR * uint256(10 ** decimals()), totalSupply());
+    //👉 After 1 round:
+    //👉 10 released
+    //👉 90 remain locked
 
-            // D18+decimals{reward/share} += D18+decimals{reward/share}
-            rewardInfo.rewardIndex += deltaIndex;
-            rewardInfo.balanceAccounted += tokensToHandout;
-        }
+    //👉 After 2nd round:
+    //👉 10% of remaining 90 released
+    //👉 9 more released
+    //👉 Total released = 19
+    //👉 Remaining locked = 81
 
-        rewardInfo.payoutLastPaid = block.timestamp;
-    }
+    //👉 So rewards are NOT released linearly
+    //👉 Each round releases percentage of remaining locked rewards
 
-    function _accrueUser(address _user, address _rewardToken) internal {
-        if (_user == address(0)) {
-            return;
-        }
+    //👉 1e18 represents 100% in fixed-point precision math
+    //👉 Solidity has no decimal support, so:
+    //👉 1e18 = 100%
+    //👉 0.5e18 = 50%
+    //👉 0.1e18 = 10%
 
-        RewardInfo memory rewardInfo = rewardTrackers[_rewardToken];
-        UserRewardInfo storage userRewardTracker = userRewardTrackers[_rewardToken][_user];
+    //👉 UD60x18.wrap(...)
+    //👉 Converts normal uint into PRBMath fixed-point decimal number
+    //👉 Needed because .powu() works with UD60x18 math type
 
-        // D18+decimals{reward/share}
-        uint256 deltaIndex = rewardInfo.rewardIndex - userRewardTracker.lastRewardIndex;
+    //👉 .powu(elapsed)
+    //👉 Applies repeated exponential decay
+    //👉 Example:
+    //👉 (90%)^2 = 81%
+    //👉 Meaning 81% still remains locked after 2 rounds
 
-        if (deltaIndex != 0) {
-            // Accumulate rewards by multiplying user tokens by index and adding on unclaimed
-            // {reward} = {share} * D18+decimals{reward/share} / decimals / D18
-            uint256 supplierDelta = Math.mulDiv(balanceOf(_user), deltaIndex, uint256(10 ** decimals()) * SCALAR);
+    //👉 .unwrap()
+    //👉 Converts UD60x18 type back into normal uint256
 
-            // {reward} += {reward}
-            userRewardTracker.accruedRewards += supplierDelta;
-            userRewardTracker.lastRewardIndex = rewardInfo.rewardIndex;
-        }
-    }
+    //👉 Final "-1"
+    //👉 Small rounding adjustment to avoid rounding up
+    //👉 Keeps calculations safely rounded down
 
-    /**
-     * @dev Uses global `rewardRatio`
-     */
-    function _calculateHandout(uint256 balanceAvailable, uint256 elapsed)//👉 Calculates how much reward should be released from the reward pool based on time decay (exponential curve).
-        internal
-        view
-        returns (uint256 tokensToHandout)
-    {
-        // The checks are in order of likelihood to save gas
-        if (balanceAvailable == 0 || elapsed == 0 || totalSupply() == 0) {
-            return 0;
-        }
-//handoutPercentage = 1e18 - (1e18 - rewardRatio)^elapsed
+    // {reward|asset} = {reward|asset} * D18{1} / D18
 
-        uint256 handoutPercentage = 1e18 - UD60x18.wrap(1e18 - rewardRatio).powu(elapsed).unwrap() - 1; // 100 tokens locked  ,,Step 1 :10% released:10 released 90 locked
-    
-        // {reward|asset} = {reward|asset} * D18{1} / D18 
-        tokensToHandout = Math.mulDiv(balanceAvailable, handoutPercentage, 1e18);//tokensToHandout = 100 × 19%   = 19 tokens
-    }
+    tokensToHandout = Math.mulDiv(
+        balanceAvailable,
+        handoutPercentage,
+        1e18
+    );
+    //👉 Converts percentage into actual token amount
+    //👉 Example:
+    //👉 balanceAvailable = 100
+    //👉 handoutPercentage = 19%
+    //👉 tokensToHandout = 19 tokens
+}
 
-    /**
-     * Overrides
-     */
-    function _update(address from, address to, uint256 value)
-        internal
-        override(ERC20Upgradeable, ERC20VotesUpgradeable)
-        accrueRewards(from, to)
-    {
-        super._update(from, to, value);
-        _moveOptimisticDelegateVotes(optimisticDelegatees[from], optimisticDelegatees[to], value);
-    }
+/**
+ * Overrides
+ */
 
-    function nonces(address _owner) public view override(ERC20PermitUpgradeable, NoncesUpgradeable) returns (uint256) {
-        return super.nonces(_owner);
-    }
+function _update(
+    address from, //👉 Address losing shares/tokens   Example: Alice
+    address to, //👉 Address receiving shares/tokens   Example: Bob
+    uint256 value //👉 Amount of shares transferred/minted/burned   Example: 100 shares
+)
+    internal
+    override(ERC20Upgradeable, ERC20VotesUpgradeable)
+    accrueRewards(from, to) //👉 First update rewards before balances change
+{
+    super._update(from, to, value);
+    //👉 Executes normal ERC20/ERC4626 token balance update logic
+    //👉 Handles transfer, mint, or burn internally
+    //👉 Example:
+    //👉 Alice sends 100 shares → Bob receives 100 shares
 
-    function decimals() public view virtual override(ERC20Upgradeable, ERC4626Upgradeable) returns (uint8) {
-        return super.decimals();
-    }
+    _moveOptimisticDelegateVotes(
+        optimisticDelegatees[from],
+        optimisticDelegatees[to],
+        value
+    );
+    //👉 Moves optimistic voting power together with token ownership
+    //👉 Example:
+    //👉 Alice delegated to Charlie
+    //👉 Bob delegated to David
+    //👉 100 votes removed from Charlie and added to David
+}
 
-    /**
-     * ERC5805 Clock
-     */
-    function clock() public view override returns (uint48) {
-        return Time.timestamp();
-    }
+function nonces(
+    address _owner //👉 User address owning permit signatures   Example: Alice
+)
+    public
+    view
+    override(ERC20PermitUpgradeable, NoncesUpgradeable)
+    returns (uint256)
+{
+    return super.nonces(_owner);
+    //👉 Returns current nonce for permit signatures
+    //👉 Nonce increases after every successful signature use
+    //👉 Prevents replay attacks using same signature twice
+    //👉 Example:
+    //👉 Alice current nonce = 5
+    //👉 Next valid signature must use nonce 5
+}
 
-    function CLOCK_MODE() public pure override returns (string memory) {
-        return "mode=timestamp";
-    }
+function decimals()
+    public
+    view
+    virtual
+    override(ERC20Upgradeable, ERC4626Upgradeable)
+    returns (uint8)
+{
+    return super.decimals();
+    //👉 Returns token decimal precision
+    //👉 Usually returns 18
+    //👉 Example:
+    //👉 1 token internally stored as 1e18
+}
 
-    /**
-     * @dev Upgrade to latest non-deprecated version only
-     */
-    function _authorizeUpgrade(address stakingVaultImpl) internal view override onlyRole(DEFAULT_ADMIN_ROLE) {
-        bytes32 versionHash = keccak256(abi.encodePacked(Versioned(stakingVaultImpl).version()));
+/**
+ * ERC5805 Clock
+ */
 
-        // RoleRegistry SHOULD maintain fresh latest versions
+function clock()
+    public
+    view
+    override
+    returns (uint48)
+{
+    return Time.timestamp();
+    //👉 Returns current timestamp used for governance checkpoints
+    //👉 Uses OpenZeppelin Time library
+    //👉 Example:
+    //👉 Current unix timestamp = 1710000000
+}
 
-        (bytes32 latestVersionHash,,, bool deprecated) = versionRegistry.getLatestVersion();
-        require(!deprecated, Vault__VersionDeprecated(versionHash));
-        require(versionHash == latestVersionHash, Vault__NotLatestStakingVault(stakingVaultImpl));
+function CLOCK_MODE()
+    public
+    pure
+    override
+    returns (string memory)
+{
+    return "mode=timestamp";
+    //👉 Tells governance system checkpoints use timestamps instead of block numbers
+    //👉 Example:
+    //👉 Votes checked using "time" snapshots
+}
 
-        (address latestStakingVaultImpl,,) = versionRegistry.getImplementationsForVersion(versionHash);
-        require(latestStakingVaultImpl == stakingVaultImpl, Vault__NotLatestStakingVault(stakingVaultImpl));
-    }
+ /**
+ * @dev Upgrade to latest non-deprecated version only
+ */
+
+function _authorizeUpgrade(
+    address stakingVaultImpl //👉 New implementation contract address for upgrade
+)
+    internal
+    view
+    override
+    onlyRole(DEFAULT_ADMIN_ROLE) //👉 Only admin can approve upgrades
+{
+    bytes32 versionHash =
+        keccak256(
+            abi.encodePacked(
+                Versioned(stakingVaultImpl).version()
+            )
+        );
+    //👉 Creates unique hash of new implementation version string
+    //👉 Example:
+    //👉 "v2.0.0" → hashed into bytes32 identifier
+
+    // RoleRegistry SHOULD maintain fresh latest versions
+
+    (
+        bytes32 latestVersionHash,
+        ,
+        ,
+        bool deprecated
+    ) = versionRegistry.getLatestVersion();
+    //👉 Load latest approved version info from registry
+
+    require(
+        !deprecated,
+        Vault__VersionDeprecated(versionHash)
+    );
+    //👉 Reject upgrade if latest version itself is deprecated
+
+    require(
+        versionHash == latestVersionHash,
+        Vault__NotLatestStakingVault(stakingVaultImpl)
+    );
+    //👉 Only allows upgrading to officially latest version
+    //👉 Prevents upgrading into old/outdated implementation
+
+    (
+        address latestStakingVaultImpl,
+        ,
+        
+    ) = versionRegistry.getImplementationsForVersion(versionHash);
+    //👉 Load official implementation address for this version
+
+    require(
+        latestStakingVaultImpl == stakingVaultImpl,
+        Vault__NotLatestStakingVault(stakingVaultImpl)
+    );
+    //👉 Verifies provided implementation exactly matches registry-approved contract
+    //👉 Prevents malicious custom implementations from being upgraded into proxy
+}
 
     function _delegateOptimistic( //👉 Changes optimistic voting delegation
         address account, //👉 User whose votes are being delegated    Example: Alice
@@ -690,13 +1143,13 @@ function _moveOptimisticDelegateVotes( //👉 Moves optimistic voting power from
     if (from != address(0)) { //👉 Remove votes from old delegate   address(0) means “no delegate”
 
         Checkpoints.Trace208 storage fromCheckpoints =
-            optimisticDelegateCheckpoints[from];
+            optimisticDelegateCheckpoints[from];//address  →  Trace208
         //👉 Load Charlie vote-history storage from mapping
         //👉 Trace208 stores historical snapshots like:
         //👉 time 100 => 50 votes
         //👉 time 200 => 300 votes
 
-        uint256 oldValue = fromCheckpoints.latest(); //👉 .latest() comes from OpenZeppelin Checkpoints library   Gets newest stored vote amount   Example: 300
+        uint256 oldValue = fromCheckpoints.latest(); //👉.latest() comes from OpenZeppelin Checkpoints library   Gets newest stored vote amount   Example: 300  //fromCheckpoints.latest() compiler secretly convert করে:Checkpoints.latest(fromCheckpoints)
 
         uint256 newValue = oldValue - amount; //👉 Remove moved votes   Example: 300 - 100 = 200
 
@@ -743,5 +1196,5 @@ function _moveOptimisticDelegateVotes( //👉 Moves optimistic voting power from
         );
         //👉 Emit event showing Bob votes changed from 50 → 150
     }
-}
-}
+}//*Done
+
