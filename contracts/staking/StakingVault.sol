@@ -651,13 +651,13 @@ function _accrueRewards(
         address rewardToken = _rewardTokens[i];
         //👉 Current reward token in loop   Example: USDC
 
-        if (!rewardTokenRegistry.isRegistered(rewardToken)) {
-            //👉 Skip token if registry no longer approves it
+        if (!rewardTokenRegistry.isRegistered(rewardToken)) {//isRegistered(USDC) true  !true false  if (false) ❌ if block execute হবে না।
+            //👉 Skip token if registry no longer approves it //"Skip all reward calculations for this token"  _accrueRewards(rewardToken) এইটা আর execute হবে না।
 
             rewardTrackers[rewardToken].payoutLastPaid = block.timestamp;
             //👉 Update timestamp so old elapsed time does not keep growing forever
 
-            continue;
+            continue;//এই loop iteration এখানেই stop  NEXT iteration এ যাও
             //👉 Skip remaining logic for this token
         }
 
@@ -722,12 +722,12 @@ function _accrueRewards(
     //👉 Cache previous known reward balance
     //👉 Example: Previously vault knew about 100 USDC rewards
 
-    rewardInfo.balanceLastKnown =
-        IERC20(_rewardToken).balanceOf(address(this)) +
+    rewardInfo.balanceLastKnown =//ধরো vault historically reward পেয়েছে:100 USDC  তারপর user claim করেছে: 30 USDC তাই physically vault এ এখন আছে: 70 USDC
+        IERC20(_rewardToken).balanceOf(address(this)) +//কিন্তু protocol accounting এ জানতে চায়: Historically মোট reward কত এসেছিল?
         rewardInfo.totalClaimed;
     //👉 Update latest known total reward balance
     //👉 Adds totalClaimed because claimed rewards already left vault physically
-    //👉 but still belong in accounting history
+    //👉 but still belong in accounting history,,, existing reward + claimed reward
     //👉 Example:
     //👉 Current vault USDC = 70
     //👉 Already claimed = 30
@@ -742,11 +742,11 @@ function _accrueRewards(
     //👉 elapsed = 60 seconds
 
     uint256 unaccountedBalance =
-        balanceLastKnown - rewardInfo.balanceAccounted;
+        balanceLastKnown - rewardInfo.balanceAccounted;//unaccountedBalance = 100 - 40 = 60
     //👉 Rewards existing in vault but not yet distributed into rewardIndex
     //👉 Example:
     //👉 Total rewards known = 100
-    //👉 Already accounted = 40
+    //👉 Already accounted = 40  এখন পর্যন্ত protocol officially reward system-এ যোগ করেছে: সব reward instantly users-কে distribute করে নাই protocol। 
     //👉 unaccountedBalance = 60
 
     uint256 tokensToHandout =
@@ -767,7 +767,7 @@ function _accrueRewards(
             totalSupply()
         );
         //👉 Calculates extra reward per share
-        //👉 Example:
+        //👉 Example:   
         //👉 10 USDC unlocked
         //👉 Total shares = 100
         //👉 Each share earns 0.1 USDC more
